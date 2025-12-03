@@ -21,45 +21,30 @@ from rag import (
     get_openai_client,
 )
 
-# -----------------------------
-# APP
-# -----------------------------
 app = FastAPI(title="Academic AI Backend")
 
-# CORS
+# CORS - revisar en producción
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # en prod puedes restringir
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -----------------------------
-# MODELOS (alineados con frontend)
-# -----------------------------
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
     index_name: Optional[str] = "default"
 
-
 class ChatResponse(BaseModel):
     response: str
     conversation_id: str
 
-
-# -----------------------------
-# NUEVO CHAT
-# -----------------------------
 @app.post("/new-chat")
 def new_chat():
     return {"conversation_id": str(uuid.uuid4())}
 
-
-# -----------------------------
-# UPLOAD DOCUMENTO (RAG)
-# -----------------------------
 @app.post("/upload-doc")
 async def upload_doc(
     file: UploadFile = File(...),
@@ -76,7 +61,7 @@ async def upload_doc(
     else:
         text = extract_text_from_txt_bytes(contents)
 
-    chunks = simple_chunk_text(text, max_len=1000, overlap=200)
+    chunks = simple_chunk_text(text, max_len=int(os.getenv("CHUNK_SIZE", 1000)), overlap=int(os.getenv("CHUNK_OVERLAP", 200)))
     if not chunks:
         raise HTTPException(status_code=400, detail="No se pudo extraer texto.")
 
@@ -95,98 +80,61 @@ async def upload_doc(
         "chunks": len(chunks),
     }
 
-
-# -----------------------------
-# CHAT (RAG + OPENAI)
-# -----------------------------
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     conversation_id = req.conversation_id or str(uuid.uuid4())
 
-    # cargar índice
     index, meta = load_index_and_meta(req.index_name)
-
     retrieved_chunks = []
 
     if index is not None:
         try:
             client = get_openai_client()
-
             # embedding de la pregunta
-            if hasattr(client, "embeddings"):
-                res = client.embeddings.create(
-                    model=os.getenv(
-                        "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
-                    ),
-                    input=req.message,
-                )
-                q_emb = np.array(res.data[0].embedding, dtype="float32")
-            else:
-                import openai
-
-                res = openai.Embedding.create(
-                    model=os.getenv(
-                        "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
-                    ),
-                    input=req.message,
-                )
-                q_emb = np.array(res["data"][0]["embedding"], dtype="float32")
+            res = client.embeddings.create(model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"), input=req.message)
+            q_emb = np.array(res.data[0].embedding, dtype="float32")
 
             ids, _ = retrieve_top_k(index, q_emb, k=4)
-
             for i in ids:
                 try:
                     retrieved_chunks.append(meta["chunks"][int(i)])
                 except Exception:
                     pass
         except Exception:
-            pass
+            # si falla recuperación/embeddings, seguimos sin contexto
+            retrieved_chunks = []
 
     context_text = "\n\n---\n\n".join(retrieved_chunks)
 
-    system_prompt = (
-        "Eres un asistente académico. "
-        "Responde claro, paso a paso y solo con información confiable."
-    )
+    system_prompt = "Eres un asistente académico. Responde claro, paso a paso y solo con información confiable."
 
-    user_prompt = f"""
-{system_prompt}
-
+    user_message = f"""
 Contexto:
 {context_text}
 
 Pregunta:
 {req.message}
-Respuesta:
 """
 
     try:
-        import openai
-
-        openai.api_key = os.getenv("OPENAI_API_KEY")
-
-        completion = openai.ChatCompletion.create(
+        client = get_openai_client()
+        completion = client.chat.completions.create(
             model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "user", "content": user_prompt}],
-            temperature=0.2,
-            max_tokens=512,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=float(os.getenv("TEMPERATURE", 0.2)),
+            max_tokens=int(os.getenv("MAX_TOKENS", 512)),
         )
-
+        # obtener texto
         answer = completion.choices[0].message.content
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI error: {e}")
 
-    return {
-        "response": answer,
-        "conversation_id": conversation_id,
-    }
+    return {"response": answer, "conversation_id": conversation_id}
 
-
-# -----------------------------
-# ENTRYPOINT LOCAL
-# -----------------------------
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)

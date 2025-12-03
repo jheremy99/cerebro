@@ -6,11 +6,10 @@ import faiss
 from typing import List
 from pypdf import PdfReader
 import docx2txt
-from openai import OpenAI  # if you use openai python client v1 you can fallback to import openai
-import math
+from openai import OpenAI
 
 EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-EMBED_DIM = 1536  # ajustar si usas otro modelo; muchas embeddings devuelven 1536
+EMBED_DIM = 1536  # ajustar si usas otro modelo
 
 def extract_text_from_pdf_bytes(data: bytes) -> str:
     reader = PdfReader(stream=data)
@@ -20,7 +19,6 @@ def extract_text_from_pdf_bytes(data: bytes) -> str:
     return "\n".join(text)
 
 def extract_text_from_docx_bytes(data: bytes) -> str:
-    # docx2txt needs a temp file
     import tempfile
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tf:
         tf.write(data)
@@ -39,7 +37,6 @@ def extract_text_from_txt_bytes(data: bytes) -> str:
         return data.decode("latin-1", errors="ignore")
 
 def simple_chunk_text(text: str, max_len: int = 1000, overlap: int = 200) -> List[str]:
-    # chunk por caracteres conservando solapamiento
     chunks = []
     start = 0
     text_len = len(text)
@@ -52,41 +49,18 @@ def simple_chunk_text(text: str, max_len: int = 1000, overlap: int = 200) -> Lis
             start = 0
     return [c.strip() for c in chunks if c.strip()]
 
-# Embedding: utiliza la librería openai o OpenAI client
 def get_openai_client():
-    # si usas openai package:
-    try:
-        import openai
-        openai.api_key = os.getenv("OPENAI_API_KEY")
-        return openai
-    except Exception:
-        # try new client (openai.OpenAI)
-        return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    """Return OpenAI v1 client (OpenAI class)."""
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def embed_texts(texts: List[str]):
+def embed_texts(texts: List[str]) -> np.ndarray:
+    """Return stacked embeddings for a list of texts (float32 numpy array)."""
     client = get_openai_client()
-    # fallback a lote por cada texto
     embeddings = []
-    # If using "openai" library:
-    if hasattr(client, "Embedding") or hasattr(client, "embeddings"):
-        # support both libraries
-        try:
-            # new OpenAI client style
-            if hasattr(client, "embeddings"):
-                for t in texts:
-                    res = client.embeddings.create(model=EMBED_MODEL, input=t)
-                    emb = res.data[0].embedding
-                    embeddings.append(np.array(emb, dtype="float32"))
-            else:
-                # old openai library
-                for t in texts:
-                    res = client.Embedding.create(model=EMBED_MODEL, input=t)
-                    emb = res["data"][0]["embedding"]
-                    embeddings.append(np.array(emb, dtype="float32"))
-        except Exception as e:
-            raise RuntimeError("Error calling embeddings: " + str(e))
-    else:
-        raise RuntimeError("OpenAI client not available")
+    for t in texts:
+        res = client.embeddings.create(model=EMBED_MODEL, input=t)
+        emb = res.data[0].embedding
+        embeddings.append(np.array(emb, dtype="float32"))
     return np.vstack(embeddings)
 
 def build_faiss_index(embeddings: np.ndarray):

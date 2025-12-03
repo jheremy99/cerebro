@@ -1,8 +1,9 @@
 fastapi
-uvicorn[standard]          # ← ESTA LÍNEA ES LA CLAVE
+uvicorn[standard]
 python-multipart
-openai
+openai>=1.3.0
 faiss-cpu
 python-dotenv
 pypdf
 docx2txt
+numpy
